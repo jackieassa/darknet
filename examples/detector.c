@@ -1,5 +1,6 @@
 #include "darknet.h"
 
+
 static int coco_ids[] = {1,2,3,4,5,6,7,8,9,10,11,13,14,15,16,17,18,19,20,21,22,23,24,25,27,28,31,32,33,34,35,36,37,38,39,40,41,42,43,44,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,67,70,72,73,74,75,76,77,78,79,80,81,82,84,85,86,87,88,89,90};
 
 void train_detector(char *datacfg, char *cfgfile, char *weightfile, int *gpus, int ngpus, int clear)
@@ -576,6 +577,97 @@ void validate_detector_recall(char *cfgfile, char *weightfile)
     }
 }
 
+void write_detections(FILE *stream, image im,int frame,int num, float thresh, box *boxes, float **probs, char **names, int classes)
+{
+    int i;
+    int count = 0;
+    for(i = 0; i < num; ++i){
+        int class = max_index(probs[i], classes);
+        float prob = probs[i][class];
+	
+        if (prob>0) {
+                //printf("%d %s: %.0f%%\n", i, names[class], prob*100);
+                //printf("%s: %.0f%%\n", names[class], prob*100);
+                box b = boxes[i];
+
+                int left  = (b.x-b.w/2.)*im.w;
+                int right = (b.x+b.w/2.)*im.w;
+                int top   = (b.y-b.h/2.)*im.h;
+                int bot   = (b.y+b.h/2.)*im.h;
+
+                if(left < 0) left = 0;
+                if(right > im.w-1) right = im.w-1;
+                if(top < 0) top = 0;
+                if(bot > im.h-1) bot = im.h-1;
+
+                fprintf(stream,"%d,%d,%d,%d,%d,%d,%f,%s\n",frame,i,left, top, right, bot,prob,names[class]);
+                count++;
+        }
+    }
+    printf("frame: %d count: %d\n",frame,count);
+}
+
+void test_detector2(char *datacfg, char *cfgfile, char *weightfile, char *filename, float thresh, float hier_thresh, char *outfile, int fullscreen)
+{
+    list *options = read_data_cfg(datacfg);
+    char *name_list = option_find_str(options, "names", "data/names.list");
+    char **names = get_labels(name_list);
+
+    image **alphabet = load_alphabet();
+    network net = parse_network_cfg(cfgfile);
+    if(weightfile){
+        load_weights(&net, weightfile);
+    }
+    set_batch_network(&net, 1);
+    srand(2222222);
+    clock_t time;
+    char buff[256];
+    int j;
+    float nms=.4;
+    int frame = 1;
+    char csvFilename[1024];
+    snprintf(csvFilename, 1024, "%s.csv", filename);
+    FILE *stream = fopen(csvFilename,"w");
+    fprintf(stream,"frame,num,left,top,right,bot,prob,class\n");
+
+    // open video
+    CvCapture *cap = cvCaptureFromFile(filename);
+    image im = get_image_from_stream(cap);
+    layer l = net.layers[net.n-1];
+
+    box *boxes = calloc(l.w*l.h*l.n, sizeof(box));
+    float **probs = calloc(l.w*l.h*l.n, sizeof(float *));
+    for(j = 0; j < l.w*l.h*l.n; ++j) probs[j] = calloc(l.classes + 1, sizeof(float *));
+
+    int hasFrame = 1;
+    printf("looping over frames\n");
+    while(hasFrame){
+        // read next frame
+        hasFrame = fill_image_from_stream(cap, im);
+        if (!hasFrame)
+            break;
+
+        //im = get_image_from_stream(cap);
+        image sized = letterbox_image(im, net.w, net.h);
+        float *X = sized.data;
+        time=clock();
+        network_predict(net, X);
+        
+        get_region_boxes(l, im.w, im.h, net.w, net.h, thresh, probs, boxes, 0, 0, hier_thresh, 1);
+        if (nms) 
+            do_nms_obj(boxes, probs, l.w*l.h*l.n, l.classes, nms);
+        //else if (nms) do_nms_sort(boxes, probs, l.w*l.h*l.n, l.classes, nms);
+        write_detections(stream,im,frame, l.w*l.h*l.n, thresh, boxes, probs, names, l.classes);
+        //free_image(im);
+        //free_image(sized);
+        frame ++;
+    }
+    free(boxes);
+    free_ptrs((void **)probs, l.w*l.h*l.n);
+    fclose(stream);
+}
+
+
 void test_detector(char *datacfg, char *cfgfile, char *weightfile, char *filename, float thresh, float hier_thresh, char *outfile, int fullscreen)
 {
     list *options = read_data_cfg(datacfg);
@@ -695,6 +787,7 @@ void run_detector(int argc, char **argv)
     char *weights = (argc > 5) ? argv[5] : 0;
     char *filename = (argc > 6) ? argv[6]: 0;
     if(0==strcmp(argv[2], "test")) test_detector(datacfg, cfg, weights, filename, thresh, hier_thresh, outfile, fullscreen);
+    else if(0==strcmp(argv[2], "test2")) test_detector2(datacfg, cfg, weights, filename, thresh, hier_thresh, outfile, fullscreen);
     else if(0==strcmp(argv[2], "train")) train_detector(datacfg, cfg, weights, gpus, ngpus, clear);
     else if(0==strcmp(argv[2], "valid")) validate_detector(datacfg, cfg, weights, outfile);
     else if(0==strcmp(argv[2], "valid2")) validate_detector_flip(datacfg, cfg, weights, outfile);
